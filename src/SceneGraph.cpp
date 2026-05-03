@@ -484,6 +484,7 @@ void SceneGraph::CreateActorModel(RE::Actor* actor, RE::NiAVObject* root, bool f
 		auto object = actor->Get3D(firstPerson);
 
 		if (auto* model = CommitModel(name.c_str(), object, actor, meshes)) {
+			model->m_FirstPerson = firstPerson;
 			AddInstance(actor->GetFormID(), object, model);
 			m_Actors.try_emplace(actor->GetFormID(), ActorReference(actor, firstPerson, faceMeshes, bipedMeshes));
 		}

@@ -109,12 +109,18 @@ void Model::SetData(MeshData* meshData, uint32_t& index)
 void Model::BuildBLAS(nvrhi::ICommandList* commandList)
 {
 	auto blasDesc = MakeBLASDesc(false);
+	uint32_t geometryCount = 0;
+	uint64_t geometryHash = 1469598103934665603ull;
 
 	for (auto& mesh: meshes) {
 		if (mesh->IsHidden())
 			continue;
 
 		blasDesc.addBottomLevelGeometry(mesh->geometryDesc);
+		const auto indexCount = static_cast<uint64_t>(mesh->geometryDesc.geometryData.triangles.indexCount);
+		geometryHash ^= indexCount;
+		geometryHash *= 1099511628211ull;
+		geometryCount++;
 	}
 
 	auto* renderer = Renderer::GetSingleton();
@@ -124,11 +130,28 @@ void Model::BuildBLAS(nvrhi::ICommandList* commandList)
 	nvrhi::utils::BuildBottomLevelAccelStruct(commandList, blas, blasDesc);
 
 	m_LastBLASUpdate = renderer->GetFrameIndex();
+	m_LastBLASGeometryCount = geometryCount;
+	m_LastBLASGeometryHash = geometryHash;
 }
 
 void Model::UpdateBLAS(nvrhi::ICommandList* commandList)
 {
 	bool update;
+	eastl::vector<Mesh*> visibleMeshes;
+	visibleMeshes.reserve(meshes.size());
+	uint32_t geometryCount = 0;
+	uint64_t geometryHash = 1469598103934665603ull;
+
+	for (auto& mesh : meshes) {
+		if (mesh->IsHidden())
+			continue;
+
+		visibleMeshes.push_back(mesh.get());
+		const auto indexCount = static_cast<uint64_t>(mesh->geometryDesc.geometryData.triangles.indexCount);
+		geometryHash ^= indexCount;
+		geometryHash *= 1099511628211ull;
+		geometryCount++;
+	}
 
 	if (m_DirtyFlags.any(DirtyFlags::Visibility, DirtyFlags::Mesh))
 		update = false;
@@ -144,20 +167,28 @@ void Model::UpdateBLAS(nvrhi::ICommandList* commandList)
 		update = true;
 	}
 
+	// A BLAS update requires the same geometry layout and primitive counts as the initial build.
+	// If they changed without a mesh/visibility dirty flag, force a safe rebuild.
+	if (update && (geometryCount != m_LastBLASGeometryCount || geometryHash != m_LastBLASGeometryHash)) {
+		logger::warn(
+			"Model::UpdateBLAS - Forcing BLAS rebuild due to geometry topology mismatch for {} ({}->{}, {}->{})",
+			m_Name.c_str(), m_LastBLASGeometryCount, geometryCount, m_LastBLASGeometryHash, geometryHash);
+		update = false;
+	}
+
 	// If update is false the BLAS will be rebuilt (vertex moves = update, mesh hidden = rebuild)
 	auto blasDesc = MakeBLASDesc(update);
 
-	for (auto& mesh: meshes)
+	for (auto* mesh : visibleMeshes)
 	{
-		if (mesh->IsHidden())
-			continue;
-
 		blasDesc.addBottomLevelGeometry(mesh->geometryDesc);
 	}
 
 	nvrhi::utils::BuildBottomLevelAccelStruct(commandList, blas, blasDesc);
 
 	m_LastBLASUpdate = Renderer::GetSingleton()->GetFrameIndex();
+	m_LastBLASGeometryCount = geometryCount;
+	m_LastBLASGeometryHash = geometryHash;
 }
 
 void Model::AppendMeshes(SceneGraph* sceneGraph, eastl::vector<eastl::unique_ptr<Mesh>>& a_meshes)

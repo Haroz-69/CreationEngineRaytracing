@@ -50,7 +50,7 @@ struct ActorReference
 		: m_Actor(actor), m_FirstPerson(firstPerson), m_FaceMeshes(faceMeshes), m_ObjectMeshes(meshes)
 	{
 
-		if (auto* biped = m_Actor->GetBiped(false).get()) {
+		if (auto* biped = m_Actor->GetBiped(m_FirstPerson).get()) {
 			for (size_t i = 0; i < RE::BIPED_OBJECT::kTotal; i++)
 			{
 				auto& object = biped->objects[i];
@@ -70,12 +70,12 @@ struct ActorReference
 	
 	RE::Actor* m_Actor;
 
-	bool m_Biped;
+	bool m_Biped = false;
 
-	bool m_FirstPerson;
+	bool m_FirstPerson = false;
 
 	// Face (Actually the head but whatever)
-	RE::NiAVObject* m_FaceNode;
+	RE::NiAVObject* m_FaceNode = nullptr;
 	eastl::vector<Mesh*> m_FaceMeshes;
 
 	// Biped Objects (equipable items)

@@ -18,6 +18,8 @@ struct Model
 	uint64_t m_LastUpdate = 0;
 
 	uint64_t m_LastBLASUpdate = 0;
+	uint32_t m_LastBLASGeometryCount = 0;
+	uint64_t m_LastBLASGeometryHash = 0;
 
 	// Meant to used for the player
 	bool m_FirstPerson = false;
