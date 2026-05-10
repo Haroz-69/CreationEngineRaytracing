@@ -33,15 +33,20 @@ public:
 
     void ApplyChanges()
     {
-        std::scoped_lock lock(m_QueueMutex);
+        eastl::vector<eastl::unique_ptr<T>> addQueue;
+        eastl::vector<T*> removeQueue;
 
-        for (auto& item : m_AddQueue)
+        {
+            std::scoped_lock lock(m_QueueMutex);
+            addQueue = eastl::move(m_AddQueue);
+            removeQueue = eastl::move(m_RemoveQueue);
+        }
+
+        for (auto& item : addQueue)
             m_Items.emplace_back(eastl::move(item));
-        m_AddQueue.clear();
 
-        for (auto* ptr : m_RemoveQueue)
+        for (auto* ptr : removeQueue)
             EraseItem(ptr);
-        m_RemoveQueue.clear();
     }
 
     // frame-time access, main thread only
