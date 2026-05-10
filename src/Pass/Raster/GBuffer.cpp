@@ -157,7 +157,7 @@ namespace Pass::Raster
 			}
 
 			i++;
-			return safe::Iterator::Continue;
+			return Iterator::Continue;
 		});
 	}
 }

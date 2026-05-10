@@ -329,7 +329,7 @@ void SceneGraph::Update(nvrhi::ICommandList* commandList)
 		instance->Update(m_NumInstances);
 
 		if (instance->IsHidden())
-			return safe::Iterator::Continue;
+			return Iterator::Continue;
 
 		bool isPlayer = Util::IsPlayerFormID(instance->m_FormID);
 
@@ -346,7 +346,7 @@ void SceneGraph::Update(nvrhi::ICommandList* commandList)
 		instance->SetHiddenModel(hiddenModel);
 
 		if (instance->SkipAS())
-			return safe::Iterator::Continue;
+			return Iterator::Continue;
 
 		uint8_t numLights = 0u;
 
@@ -373,7 +373,7 @@ void SceneGraph::Update(nvrhi::ICommandList* commandList)
 		};
 
 		m_NumInstances++;
-		return safe::Iterator::Continue;
+		return Iterator::Continue;
 	});
 
 	if (m_NumMeshes > 0)
@@ -393,7 +393,7 @@ void SceneGraph::ClearDirtyStates()
 	m_Instances.Read([&](auto& instance) {
 		instance->ClearDirtyState();
 
-		return safe::Iterator::Continue;
+		return Iterator::Continue;
 	});
 }
 

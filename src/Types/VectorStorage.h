@@ -1,59 +1,80 @@
-#pragma one
+#pragma once
 
 #include "PCH.h"
 
-#include "Types/safe.h"
+#include "Types/Iterator.h"
 
 template<typename T>
 class VectorStorage
 {
-    safe::vector<eastl::unique_ptr<T>> m_Items;
+    eastl::vector<eastl::unique_ptr<T>> m_Items;
 
-    safe::vector<eastl::unique_ptr<T>> m_AddQueue;
-    safe::vector<T*> m_RemoveQueue;
+    eastl::vector<eastl::unique_ptr<T>> m_AddQueue;
+    eastl::vector<T*> m_RemoveQueue;
+    mutable std::mutex m_QueueMutex;
 
 public:
-    template<typename Fn>
-    void Read(Fn&& fn) const {
-        m_Items.read(fn);
+    void Add(eastl::unique_ptr<T>&& ptr)
+    {
+        std::scoped_lock lock(m_QueueMutex);
+        m_AddQueue.emplace_back(eastl::move(ptr));
     }
 
-    template<typename Fn>
-    void Write(Fn&& fn) {
-        m_Items.write(fn);
+    void Remove(T* ptr)
+    {
+        std::scoped_lock lock(m_QueueMutex);
+        m_RemoveQueue.emplace_back(ptr);
     }
 
-    auto Size() const
+    auto Size() const 
     {
         return m_Items.size();
     }
 
-    void Add(eastl::unique_ptr<T>&& ptr)
-    {
-        m_AddQueue.emplace_back(eastl::move(ptr));
-    }
-
-    void Remove(auto* ptr)
-    {
-        m_RemoveQueue.emplace_back(ptr);
-    }
-
     void ApplyChanges()
     {
-        // Add
-        m_AddQueue.write([&](auto& item) {
-            m_Items.push_back(eastl::move(item));
-            return safe::Iterator::Continue;
-        });
+        std::scoped_lock lock(m_QueueMutex);
 
+        for (auto& item : m_AddQueue)
+            m_Items.emplace_back(eastl::move(item));
         m_AddQueue.clear();
 
-        // Remove
-        m_RemoveQueue.write([&](auto& ptr) {
-            m_Items.erase(ptr);
-            return safe::Iterator::Continue;
-        });
-
+        for (auto* ptr : m_RemoveQueue)
+            EraseItem(ptr);
         m_RemoveQueue.clear();
+    }
+
+    // frame-time access, main thread only
+    template<typename Fn>
+    void Read(Fn&& fn) const 
+    {
+        for (const auto& item : m_Items)
+            if (fn(item) != Iterator::Continue)
+                break;
+    }
+
+    template<typename Fn>
+    void Write(Fn&& fn) 
+    {
+        for (auto& item : m_Items)
+            if (fn(item) != Iterator::Continue)
+                break;
+    }
+
+private:
+    void EraseItem(T* ptr)
+    {
+        auto it = eastl::find_if(
+            m_Items.begin(),
+            m_Items.end(),
+            [ptr](const auto& p) {
+                return p.get() == ptr;
+            });
+
+        if (it != m_Items.end()) 
+        {
+            *it = eastl::move(m_Items.back());
+            m_Items.pop_back();
+        }
     }
 };

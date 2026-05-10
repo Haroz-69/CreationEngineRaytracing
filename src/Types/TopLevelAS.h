@@ -47,16 +47,16 @@ public:
 
 		instances.Read([&](const auto& instance) {
 			if (instance->IsHidden())
-				return safe::Iterator::Continue;
+				return Iterator::Continue;
 
 			if (instance->SkipAS())
-				return safe::Iterator::Continue;
+				return Iterator::Continue;
 
 			instance->model->UpdateBLAS(commandList);
 
 			m_InstanceDescs.push_back(instance->GetInstanceDesc());
 
-			return safe::Iterator::Continue;
+			return Iterator::Continue;
 		});
 
 		commandList->endMarker();

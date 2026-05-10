@@ -18,7 +18,6 @@
 #include "Types/BindlessTable.h"
 #include "Types/VectorStorage.h"
 #include "Types/ReleasedData.h"
-#include "Types/safe.h"
 
 #include <eastl/vector_set.h>
 #include <eastl/unordered_set.h>

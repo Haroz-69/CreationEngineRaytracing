@@ -18,11 +18,11 @@ void Light::UpdateInstances()
 		float radius = instance->m_Node->worldBound.radius;
 
 		if ((center - position).Length() > radius + runtimeData.radius.x)
-			return safe::Iterator::Continue;
+			return Iterator::Continue;
 
 		m_Instances.emplace(instance.get());
 
-		return safe::Iterator::Continue;
+		return Iterator::Continue;
 	});
 }
 
