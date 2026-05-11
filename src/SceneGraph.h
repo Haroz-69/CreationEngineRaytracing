@@ -30,6 +30,7 @@ class SceneGraph
 
 	// Model Path, Model data ptr
 	eastl::unordered_map<eastl::string, eastl::unique_ptr<Model>> m_Models;
+	mutable std::mutex m_ModelMutex;
 
 	eastl::vector<ReleasedData> m_ReleasedData;
 
@@ -87,7 +88,6 @@ class SceneGraph
 	Model* CommitModel(const char* path, RE::NiAVObject* object, RE::TESForm* form, eastl::vector<eastl::unique_ptr<Mesh>>& meshes);
 
 	Instance* AddInstanceImpl(RE::NiAVObject* node, Model* model, RE::FormID formID);
-	void AddInstance(RE::FormID formID, RE::NiAVObject* node, eastl::string path);
 	void AddInstance(RE::FormID formID, RE::NiAVObject* node, Model* path);
 	void AddInstance(RE::BGSObjectBlock* block, RE::NiAVObject* node, Model* model);
 	void AddInstance(RE::BGSTerrainBlock* block, RE::NiAVObject* node, Model* model);

@@ -385,14 +385,17 @@ void SceneGraph::Update(nvrhi::ICommandList* commandList)
 
 void SceneGraph::ClearDirtyStates()
 {
-	for (auto& [path, model] : m_Models)
 	{
-		model->ClearDirtyState();
+		std::scoped_lock lock(m_ModelMutex);
+
+		for (auto& [path, model] : m_Models)
+		{
+			model->ClearDirtyState();
+		}
 	}
 
 	m_Instances.Read([&](auto& instance) {
 		instance->ClearDirtyState();
-
 		return Iterator::Continue;
 	});
 }
@@ -606,10 +609,13 @@ bool SceneGraph::CreateLODModel(RE::BGSDistantTreeBlock* block)
 		auto modelName = eastl::string(modelNameTmp.c_str());
 
 		Model* model = nullptr;
-		if (auto it = m_Models.find(modelName); it != m_Models.end()) {
-			model = it->second.get();
+		{
+			std::scoped_lock lock(m_ModelMutex);
+			if (auto it = m_Models.find(modelName); it != m_Models.end())
+				model = it->second.get();
 		}
-		else {
+
+		if (!model) {
 			auto meshes = CreateMeshes(geometry, nullptr);
 			model = CommitModel(modelName.c_str(), geometry, nullptr, meshes);
 		}
@@ -803,6 +809,8 @@ void SceneGraph::ReleaseWaterInstance(RE::NiAVObject* node)
 		auto refCount = instance->model->Release();
 
 		if (refCount <= 0) {
+			std::scoped_lock lock(m_ModelMutex);
+
 			auto modelIt = m_Models.find(model->m_Name);
 
 			if (modelIt != m_Models.end()) {
@@ -839,6 +847,8 @@ void SceneGraph::ReleaseInstances(eastl::vector<Instance*>& instances, bool rele
 			instance->model = nullptr;
 
 			if (refCount <= 0 && releaseModel) {
+				std::scoped_lock lock(m_ModelMutex);
+
 				auto modelIt = m_Models.find(model->m_Name);
 
 				if (modelIt != m_Models.end()) {
@@ -864,6 +874,8 @@ void SceneGraph::ReleaseInstances(eastl::vector<Instance*>& instances)
 			instance->model = nullptr;
 
 			if (refCount <= 0) {
+				std::scoped_lock lock(m_ModelMutex);
+
 				auto modelIt = m_Models.find(model->m_Name);
 
 				if (modelIt != m_Models.end()) {
@@ -1110,10 +1122,18 @@ uint32_t SceneGraph::CreateModelInternal(RE::TESForm* form, const char* path, RE
 
 	auto formID = form->GetFormID();
 
-	// We only need one buffer per model
-	if (auto it = m_Models.find(path); it != m_Models.end()) {
-		AddInstance(formID, pRoot, path);
-		return static_cast<uint32_t>(it->second->meshes.size());
+	Model* model = nullptr;
+	{
+		std::scoped_lock lock(m_ModelMutex);
+
+		// We only need one buffer per model
+		if (auto it = m_Models.find(path); it != m_Models.end())
+			model = it->second.get();
+	}
+
+	if (model) {
+		AddInstance(formID, pRoot, model);
+		return static_cast<uint32_t>(model->meshes.size());
 	}
 
 	logger::trace("SceneGraph::CreateModelInternal \"{}\"", typeid(*pRoot).name());
@@ -1124,8 +1144,10 @@ uint32_t SceneGraph::CreateModelInternal(RE::TESForm* form, const char* path, RE
 	auto meshes = CreateMeshes(pRoot, form);
 
 	auto numMeshes = static_cast<uint32_t>(meshes.size());
+	
+	model = CommitModel(path, pRoot, form, meshes);
 
-	if (auto* model = CommitModel(path, pRoot, form, meshes))
+	if (model)
 		AddInstance(form->GetFormID(), pRoot, model);
 
 	return numMeshes;
@@ -1133,15 +1155,15 @@ uint32_t SceneGraph::CreateModelInternal(RE::TESForm* form, const char* path, RE
 
 Model* SceneGraph::CommitModel(const char* path, RE::NiAVObject* object, RE::TESForm* form, eastl::vector<eastl::unique_ptr<Mesh>>& meshes) {
 	if (auto shapeCount = meshes.size(); shapeCount > 0) {
+
 		auto model = eastl::make_unique<Model>(path, object, form, meshes);
+		auto* modelPtr = model.get();
 
-		auto& modelName = model->m_Name;
-
-		auto [it, emplaced] = m_Models.try_emplace(modelName, eastl::move(model));
+		m_ModelMutex.lock();
+		auto [it, emplaced] = m_Models.try_emplace(model->m_Name, eastl::move(model));
+		m_ModelMutex.unlock();
 
 		if (emplaced) {
-			auto* modelPtr = it->second.get();
-
 			// Copy Command
 			auto copyCommandList = Renderer::GetSingleton()->GetCopyCommandList();
 			copyCommandList->open();
@@ -1209,16 +1231,6 @@ Instance* SceneGraph::AddInstanceImpl(RE::NiAVObject* node, Model* model, RE::Fo
 	m_Instances.Add(eastl::move(instance));
 
 	return instancePtr;
-}
-
-void SceneGraph::AddInstance(RE::FormID formID, RE::NiAVObject* node, eastl::string path)
-{
-	auto modelIt = m_Models.find(path);
-	if (modelIt == m_Models.end())
-		return;
-
-	if (auto* instance = AddInstanceImpl(node, modelIt->second.get(), formID))
-		m_InstancesFormIDs[formID].push_back(instance);
 }
 
 void SceneGraph::AddInstance(RE::FormID formID, RE::NiAVObject* node, Model* model)
