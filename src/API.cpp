@@ -70,6 +70,16 @@ void GetPassTimings(eastl::vector<PassTiming>& passTimings)
 	passTimings = Renderer::GetSingleton()->GetPassTimings();
 }
 
+void GetSceneGraphCounters(uint32_t& textures, uint32_t& models, uint32_t& instances)
+{
+	auto* sceneGraph = Scene::GetSingleton()->GetSceneGraph();
+	auto& textureManager = sceneGraph->GetTextureManager();
+
+	textures = static_cast<uint32_t>(textureManager->m_Textures.size() + textureManager->m_NormalMaps.size());
+	models = static_cast<uint32_t>(sceneGraph->GetModels().size());
+	instances = static_cast<uint32_t>(sceneGraph->GetInstances().Size());
+}
+
 void UpdateSettings(Settings settings)
 {
 	auto* scene = Scene::GetSingleton();
