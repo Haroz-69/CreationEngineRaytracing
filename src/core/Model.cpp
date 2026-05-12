@@ -260,3 +260,5 @@ void Model::RemoveMeshes(const eastl::vector<Mesh*>& a_meshes)
 	if (meshes.size() != oldSize)	
 		m_DirtyFlags.set(DirtyFlags::Mesh);
 }
+
+DEFINE_ENUM_FLAG_OPERATORS(Model::Flags::Flag);
