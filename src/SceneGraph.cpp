@@ -803,7 +803,7 @@ void SceneGraph::ReleaseModel(const Model* model)
 	{
 		std::scoped_lock releaseLock(m_ModelReleaseMutex);
 		m_ReleasedModels.push_back(eastl::move(it->second));
-		logger::warn("SceneGraph::ReleaseModel - Model {} has pending command list actions, released will be delayed until done.", model->m_Name);
+		logger::debug("SceneGraph::ReleaseModel - Model {} has pending command list actions, released will be delayed until done.", model->m_Name);
 	}
 
 	m_Models.erase(it);
