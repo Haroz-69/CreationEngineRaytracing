@@ -71,6 +71,17 @@ target_link_libraries(
     ${DETOURS_LIBRARY}
 )
 
+# Some third-party libs (e.g. nvrhi with dx12) are built with /GL.
+# In RelWithDebInfo, align linker options to avoid LNK4075/LNK1218 when warnings are treated as errors.
+if(MSVC)
+    target_link_options(
+        ${PROJECT_NAME}
+        PRIVATE
+            "$<$<CONFIG:RelWithDebInfo>:/LTCG>"
+            "$<$<CONFIG:RelWithDebInfo>:/INCREMENTAL:NO>"
+    )
+endif()
+
 include(NVRHI)
 
 include(NRD)

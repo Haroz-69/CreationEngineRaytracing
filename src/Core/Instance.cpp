@@ -30,6 +30,9 @@ bool Instance::IsHidden() const
 
 bool Instance::SkipAS() const
 {
+	if (!model->IsReady())
+		return true;
+
 	bool isPTActive = Scene::GetSingleton()->IsPathTracingActive();
 
 	// Skip non-effect models with kRefraction when Path Tracing is active

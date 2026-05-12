@@ -1,7 +1,7 @@
 #pragma once
 
+#include "core/InstanceManager.h"
 #include "core/Model.h"
-#include "core/Instance.h"
 #include "core/Light.h"
 #include "Core/TextureManager.h"
 #include "core/TreeLODInstance.h"
@@ -17,6 +17,7 @@
 #include "Constants.h"
 #include "Types/BindlessTableManager.h"
 #include "Types/BindlessTable.h"
+#include "Types/VectorStorage.h"
 #include "Types/ReleasedData.h"
 
 #include <eastl/vector_set.h>
@@ -26,15 +27,14 @@
 
 class SceneGraph
 {
-	std::shared_mutex m_ReleaseDataMutex;
-
 	// Model Path, Model data ptr
 	eastl::unordered_map<eastl::string, eastl::unique_ptr<Model>> m_Models;
+	mutable std::mutex m_ModelMutex;
 
-	eastl::vector<ReleasedData> m_ReleasedData;
+	eastl::vector<eastl::unique_ptr<Model>> m_ReleasedModels;
+	mutable std::mutex m_ModelReleaseMutex;
 
-	// Root node ptr, Instance data
-	eastl::vector<eastl::unique_ptr<Instance>> m_Instances;
+	InstanceManager m_Instances;
 	eastl::unordered_map<RE::FormID, eastl::vector<Instance*>> m_InstancesFormIDs;
 
 	// Water
@@ -88,7 +88,6 @@ class SceneGraph
 	Model* CommitModel(const char* path, RE::NiAVObject* object, RE::TESForm* form, eastl::vector<eastl::unique_ptr<Mesh>>& meshes);
 
 	Instance* AddInstanceImpl(RE::NiAVObject* node, Model* model, RE::FormID formID);
-	void AddInstance(RE::FormID formID, RE::NiAVObject* node, eastl::string path);
 	void AddInstance(RE::FormID formID, RE::NiAVObject* node, Model* path);
 	void AddInstance(RE::BGSObjectBlock* block, RE::NiAVObject* node, Model* model);
 	void AddInstance(RE::BGSTerrainBlock* block, RE::NiAVObject* node, Model* model);
@@ -114,7 +113,7 @@ public:
 	inline auto& GetInstanceBuffer() const { return m_InstanceBuffer; }
 
 	inline auto& GetModels() { return m_Models; }
-	inline auto& GetInstances() const { return m_Instances; }
+	inline auto& GetInstances() { return m_Instances; }
 	inline auto& GetTerrainLodInstances() const { return m_TerrainLODInstances; }
 
 	inline auto& GetLights() { return m_Lights; }
@@ -155,6 +154,8 @@ public:
 
 	void ReleaseTexture(RE::BSGraphics::Texture* texture);
 
+	void ReleaseModel(const Model* model);
+
 	// Releases an object instance while keeping the model and mesh data intact.
 	// releaseModel is to be used by water and only water.
 	void ReleaseWaterInstance(RE::NiAVObject* object);
@@ -176,5 +177,5 @@ public:
 
 	void SetLODDetached(RE::BGSDistantTreeBlock* block, bool detached);
 
-	void RunGarbageCollection(uint64_t frameIndex);
+	void RunGarbageCollection();
 };

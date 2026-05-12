@@ -63,15 +63,50 @@ nvrhi::rt::AccelStructDesc Model::MakeBLASDesc(bool update)
 	return blasDesc;
 }
 
-void Model::CreateBuffers(SceneGraph* sceneGraph, nvrhi::ICommandList* commandList)
+void Model::CreateBuffers(SceneGraph* sceneGraph)
 {
+	auto* renderer = Renderer::GetSingleton();
+	auto device = renderer->GetDevice();
+
+	m_BufferUploadCommandList = renderer->GetCopyCommandList();
+	m_BufferUploadCommandList->open();
+
 	for (auto& mesh : meshes) {
-		mesh->CreateBuffers(sceneGraph, commandList);
+		mesh->CreateBuffers(sceneGraph, m_BufferUploadCommandList);
+	}
+
+	m_BufferUploadCommandList->close();
+	m_SubmittedCopyInstance = device->executeCommandList(m_BufferUploadCommandList, nvrhi::CommandQueue::Copy);
+
+	m_BufferUploadQuery = device->createEventQuery();
+	device->setEventQuery(m_BufferUploadQuery, nvrhi::CommandQueue::Copy, m_SubmittedCopyInstance);
+}
+
+void Model::UpdateFlags()
+{
+	if (!(m_Flags & Flags::BuffersUploaded)) {
+		if (Renderer::GetSingleton()->GetDevice()->pollEventQuery(m_BufferUploadQuery)) {
+			m_Flags |= Flags::BuffersUploaded;
+
+			m_BufferUploadCommandList->Release();
+			m_BufferUploadCommandList = nullptr;
+		}
+	}
+
+	if (!(m_Flags & Flags::BLASBuilt)) {
+		if (Renderer::GetSingleton()->GetDevice()->pollEventQuery(m_BLASBuildQuery)) {
+			m_Flags |= Flags::BLASBuilt;
+
+			m_BLASBuildCommandList->Release();
+			m_BLASBuildCommandList = nullptr;
+		}
 	}
 }
 
 void Model::Update(RE::NiAVObject* object, bool isPlayer)
 {
+	UpdateFlags();
+
 	const auto frameIndex = Renderer::GetSingleton()->GetFrameIndex();
 
 	if (m_LastUpdate == frameIndex)
@@ -108,7 +143,7 @@ void Model::SetData(MeshData* meshData, uint32_t& index)
 	}
 }
 
-void Model::BuildBLAS(nvrhi::ICommandList* commandList)
+void Model::BuildBLAS()
 {
 	auto blasDesc = MakeBLASDesc(false);
 
@@ -120,12 +155,35 @@ void Model::BuildBLAS(nvrhi::ICommandList* commandList)
 	}
 
 	auto* renderer = Renderer::GetSingleton();
+	auto device = renderer->GetDevice();
 
 	blas = renderer->GetDevice()->createAccelStruct(blasDesc);
 
-	nvrhi::utils::BuildBottomLevelAccelStruct(commandList, blas, blasDesc);
+	// Compute Command - Waits for copy
+	m_BLASBuildCommandList = renderer->GetComputeCommandList();
+	m_BLASBuildCommandList->open();
+
+	nvrhi::utils::BuildBottomLevelAccelStruct(m_BLASBuildCommandList, blas, blasDesc);
+
+	m_BLASBuildCommandList->close();
+	device->queueWaitForCommandList(nvrhi::CommandQueue::Compute, nvrhi::CommandQueue::Copy, m_SubmittedCopyInstance);
+	auto submittedComputeInstance = device->executeCommandList(m_BLASBuildCommandList, nvrhi::CommandQueue::Compute);
+
+	m_BLASBuildQuery = device->createEventQuery();
+	device->setEventQuery(m_BLASBuildQuery, nvrhi::CommandQueue::Compute, submittedComputeInstance);
 
 	m_LastBLASUpdate = renderer->GetFrameIndex();
+}
+
+bool Model::IsReady() const
+{
+	if (!(m_Flags & Model::Flags::BuffersUploaded))
+		return false;
+
+	if (!(m_Flags & Model::Flags::BLASBuilt))
+		return false;
+
+	return true;
 }
 
 void Model::UpdateBLAS(nvrhi::ICommandList* commandList)
@@ -202,3 +260,5 @@ void Model::RemoveMeshes(const eastl::vector<Mesh*>& a_meshes)
 	if (meshes.size() != oldSize)	
 		m_DirtyFlags.set(DirtyFlags::Mesh);
 }
+
+DEFINE_ENUM_FLAG_OPERATORS(Model::Flags::Flag);

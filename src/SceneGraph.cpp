@@ -323,12 +323,13 @@ void SceneGraph::Update(nvrhi::ICommandList* commandList)
 
 	eastl::array<uint8_t, Constants::INSTANCE_LIGHTS_MAX> lights;
 
-	for (auto& instance : m_Instances)
-	{
+	m_Instances.ApplyChanges();
+
+	m_Instances.Read([&](auto& instance) {
 		instance->Update(m_NumInstances);
 
 		if (instance->IsHidden())
-			continue;
+			return Iterator::Continue;
 
 		bool isPlayer = Util::IsPlayerFormID(instance->m_FormID);
 
@@ -343,9 +344,9 @@ void SceneGraph::Update(nvrhi::ICommandList* commandList)
 		// No visible meshes in instance
 		bool hiddenModel = m_NumMeshes == firstMeshIndex;
 		instance->SetHiddenModel(hiddenModel);
-		
+
 		if (instance->SkipAS())
-			continue;
+			return Iterator::Continue;
 
 		uint8_t numLights = 0u;
 
@@ -372,7 +373,8 @@ void SceneGraph::Update(nvrhi::ICommandList* commandList)
 		};
 
 		m_NumInstances++;
-	}
+		return Iterator::Continue;
+	});
 
 	if (m_NumMeshes > 0)
 		commandList->writeBuffer(m_MeshBuffer, m_MeshData.data(), m_NumMeshes * sizeof(MeshData));
@@ -383,15 +385,19 @@ void SceneGraph::Update(nvrhi::ICommandList* commandList)
 
 void SceneGraph::ClearDirtyStates()
 {
-	for (auto& [path, model] : m_Models)
 	{
-		model->ClearDirtyState();
+		std::scoped_lock lock(m_ModelMutex);
+
+		for (auto& [path, model] : m_Models)
+		{
+			model->ClearDirtyState();
+		}
 	}
 
-	for (auto& instance : m_Instances)
-	{
+	m_Instances.Read([&](auto& instance) {
 		instance->ClearDirtyState();
-	}
+		return Iterator::Continue;
+	});
 }
 
 void SceneGraph::CreateModel(RE::TESForm* form, const char* model, RE::NiAVObject* root)
@@ -589,9 +595,6 @@ bool SceneGraph::CreateLODModel(RE::BGSObjectBlock* chunk)
 
 bool SceneGraph::CreateLODModel(RE::BGSDistantTreeBlock* block)
 {
-	// This prevents modifications while rendering is running
-	std::unique_lock lock(Scene::GetSingleton()->m_SceneMutex);
-
 	if (m_TreeLODInstances.contains(block))
 		return true;
 
@@ -606,10 +609,13 @@ bool SceneGraph::CreateLODModel(RE::BGSDistantTreeBlock* block)
 		auto modelName = eastl::string(modelNameTmp.c_str());
 
 		Model* model = nullptr;
-		if (auto it = m_Models.find(modelName); it != m_Models.end()) {
-			model = it->second.get();
+		{
+			std::scoped_lock lock(m_ModelMutex);
+			if (auto it = m_Models.find(modelName); it != m_Models.end())
+				model = it->second.get();
 		}
-		else {
+
+		if (!model) {
 			auto meshes = CreateMeshes(geometry, nullptr);
 			model = CommitModel(modelName.c_str(), geometry, nullptr, meshes);
 		}
@@ -624,11 +630,13 @@ bool SceneGraph::CreateLODModel(RE::BGSDistantTreeBlock* block)
 		{
 			auto* instanceDataPtr = &instanceData;
 
-			auto& instance = m_Instances.emplace_back(eastl::make_unique<TreeLODInstance>(instanceDataPtr, geometry, model));
+			auto instance = eastl::make_unique<TreeLODInstance>(instanceDataPtr, geometry, model);
 			instance->model->AddRef();
 
 			blockRefr.instances.push_back(instance.get());
 			blockRefr.treeInstanceData.push_back(instanceDataPtr);
+
+			m_Instances.Add(eastl::move(instance));
 		}
 	}
 
@@ -642,8 +650,6 @@ void SceneGraph::CreateLODModelImpl(T* block, Mesh::Type type)
 
 	if (!node)
 		return;
-
-	std::unique_lock lock(Scene::GetSingleton()->m_SceneMutex);
 
 	logger::debug("SceneGraph::CreateLODModel - {}, {}", node->name.c_str(), Util::Math::Float3(node->world.translate));
 
@@ -760,8 +766,6 @@ void SceneGraph::ActorEquip(RE::Actor* a_actor, RE::TESForm* a_form, RE::NiAVObj
 	for (const auto& mesh: meshes)
 		a_meshes.push_back(mesh.get());
 
-	std::unique_lock lock(Scene::GetSingleton()->m_SceneMutex);
-
 	for (const auto& instance : it->second) {
 		if (instance->model->m_FirstPerson == firstPerson) {
 			instance->model->AppendMeshes(this, meshes);
@@ -787,8 +791,22 @@ void SceneGraph::ActorUnequip(RE::Actor* a_actor, const eastl::vector<Mesh*>& a_
 
 void SceneGraph::ReleaseTexture(RE::BSGraphics::Texture* texture)
 {
-	std::unique_lock lock(Scene::GetSingleton()->m_SceneMutex);
 	m_TextureManager->ReleaseTexture(texture);
+}
+
+void SceneGraph::ReleaseModel(const Model* model)
+{
+	std::scoped_lock modelLock(m_ModelMutex);
+
+	auto it = m_Models.find(model->m_Name);
+	if (!(model->m_Flags & Model::Flags::BuffersUploaded) || !(model->m_Flags & Model::Flag::BLASBuilt))
+	{
+		std::scoped_lock releaseLock(m_ModelReleaseMutex);
+		m_ReleasedModels.push_back(eastl::move(it->second));
+		logger::warn("SceneGraph::ReleaseModel - Model {} has pending command list actions, released will be delayed until done.", model->m_Name);
+	}
+
+	m_Models.erase(it);
 }
 
 void SceneGraph::ReleaseWaterInstance(RE::NiAVObject* node)
@@ -797,107 +815,23 @@ void SceneGraph::ReleaseWaterInstance(RE::NiAVObject* node)
 	if (it == m_WaterInstances.end())
 		return;
 
-	std::unique_lock lock(Scene::GetSingleton()->m_SceneMutex);
-	std::unique_lock releaseLock(m_ReleaseDataMutex);
-
-	auto* instance = it->second;
-	auto* model = instance->model;
-
-	if (instance->model) {
-		auto refCount = instance->model->Release();
-
-		if (refCount <= 0) {
-			auto modelIt = m_Models.find(model->m_Name);
-
-			if (modelIt != m_Models.end()) {
-				auto renderer = Renderer::GetSingleton();
-
-				// Add to safe-release vector
-				m_ReleasedData.emplace_back(renderer->GetFrameIndex(), eastl::move(modelIt->second));
-
-				// Erase from list
-				m_Models.erase(modelIt);
-			}
-		}
-
-		instance->model = nullptr;
-	}
-
 	m_WaterInstances.erase(it);
 
-	// Removes the original instance, all pointers past this point are invalid
-	auto instIt = eastl::find_if(
-		m_Instances.begin(),
-		m_Instances.end(),
-		[instance](auto& x) { return x.get() == instance; });
-
-	if (instIt != m_Instances.end())
-		m_Instances.erase(instIt);
+	// Removes the original instance
+	m_Instances.Remove(InstanceManager::RemoveParams(it->second, true));
 }
 
 void SceneGraph::ReleaseInstances(eastl::vector<Instance*>& instances, bool releaseModel)
 {
-	std::unique_lock lock(Scene::GetSingleton()->m_SceneMutex);
-	std::unique_lock releaseLock(m_ReleaseDataMutex);
-
-	auto renderer = Renderer::GetSingleton();
-
 	for (auto* instance : instances) {
-		auto* model = instance->model;
-
-		if (model) {
-			auto refCount = model->Release();
-			instance->model = nullptr;
-
-			if (refCount <= 0 && releaseModel) {
-				auto modelIt = m_Models.find(model->m_Name);
-
-				if (modelIt != m_Models.end()) {
-					m_ReleasedData.emplace_back(renderer->GetFrameIndex(), eastl::move(modelIt->second));
-					m_Models.erase(modelIt);
-				}
-			}
-		}
-
-		auto instIt = eastl::find_if(
-			m_Instances.begin(),
-			m_Instances.end(),
-			[instance](auto& x) { return x.get() == instance; });
-
-		if (instIt != m_Instances.end())
-			m_Instances.erase(instIt);
+		m_Instances.Remove(InstanceManager::RemoveParams(instance, releaseModel));
 	}
 }
 
 void SceneGraph::ReleaseInstances(eastl::vector<Instance*>& instances)
 {
-	auto renderer = Renderer::GetSingleton();
-
 	for (auto* instance : instances) {
-		auto* model = instance->model;
-
-		if (model) {
-			auto refCount = model->Release();
-			instance->model = nullptr;
-
-			if (refCount <= 0) {
-				auto modelIt = m_Models.find(model->m_Name);
-
-				if (modelIt != m_Models.end()) {
-					m_ReleasedData.emplace_back(renderer->GetFrameIndex(), eastl::move(modelIt->second));
-					m_Models.erase(modelIt);
-				}
-			}
-
-		}
-
-		auto instIt = eastl::find_if(
-			m_Instances.begin(),
-			m_Instances.end(),
-			[instance](auto& x) { return x.get() == instance; });
-
-		if (instIt != m_Instances.end())
-			m_Instances.erase(instIt);
+		m_Instances.Remove(InstanceManager::RemoveParams(instance, true));
 	}
 }
 
@@ -1133,12 +1067,18 @@ uint32_t SceneGraph::CreateModelInternal(RE::TESForm* form, const char* path, RE
 
 	auto formID = form->GetFormID();
 
-	std::unique_lock lock(Scene::GetSingleton()->m_SceneMutex);
+	Model* model = nullptr;
+	{
+		std::scoped_lock lock(m_ModelMutex);
 
-	// We only need one buffer per model
-	if (auto it = m_Models.find(path); it != m_Models.end()) {
-		AddInstance(formID, pRoot, path);
-		return static_cast<uint32_t>(it->second->meshes.size());
+		// We only need one buffer per model
+		if (auto it = m_Models.find(path); it != m_Models.end())
+			model = it->second.get();
+	}
+
+	if (model) {
+		AddInstance(formID, pRoot, model);
+		return static_cast<uint32_t>(model->meshes.size());
 	}
 
 	logger::trace("SceneGraph::CreateModelInternal \"{}\"", typeid(*pRoot).name());
@@ -1149,8 +1089,10 @@ uint32_t SceneGraph::CreateModelInternal(RE::TESForm* form, const char* path, RE
 	auto meshes = CreateMeshes(pRoot, form);
 
 	auto numMeshes = static_cast<uint32_t>(meshes.size());
+	
+	model = CommitModel(path, pRoot, form, meshes);
 
-	if (auto* model = CommitModel(path, pRoot, form, meshes))
+	if (model)
 		AddInstance(form->GetFormID(), pRoot, model);
 
 	return numMeshes;
@@ -1158,42 +1100,22 @@ uint32_t SceneGraph::CreateModelInternal(RE::TESForm* form, const char* path, RE
 
 Model* SceneGraph::CommitModel(const char* path, RE::NiAVObject* object, RE::TESForm* form, eastl::vector<eastl::unique_ptr<Mesh>>& meshes) {
 	if (auto shapeCount = meshes.size(); shapeCount > 0) {
+
 		auto model = eastl::make_unique<Model>(path, object, form, meshes);
+		auto* modelPtr = model.get();
 
-		auto& modelName = model->m_Name;
-
-		auto [it, emplaced] = m_Models.try_emplace(modelName, eastl::move(model));
+		m_ModelMutex.lock();
+		auto [it, emplaced] = m_Models.try_emplace(model->m_Name, eastl::move(model));
+		m_ModelMutex.unlock();
 
 		if (emplaced) {
-			auto* modelPtr = it->second.get();
-
 			// Copy Command
-			auto copyCommandList = Renderer::GetSingleton()->GetCopyCommandList();
-			copyCommandList->open();
+			modelPtr->CreateBuffers(this);
 
-			modelPtr->CreateBuffers(this, copyCommandList);
+			// Compute Command - Waits for copy
+			modelPtr->BuildBLAS();
 
-			copyCommandList->close();
-
-			auto device = Renderer::GetSingleton()->GetDevice();
-
-			auto copySubmittedInstance = device->executeCommandList(copyCommandList, nvrhi::CommandQueue::Copy);
-
-			// Compute Command
-			auto computeCommandList = Renderer::GetSingleton()->GetComputeCommandList();
-			computeCommandList->open();
-
-			modelPtr->BuildBLAS(computeCommandList);
-
-			computeCommandList->compactBottomLevelAccelStructs();
-
-			computeCommandList->close();
-
-			device->queueWaitForCommandList(nvrhi::CommandQueue::Compute, nvrhi::CommandQueue::Copy, copySubmittedInstance);
-
-			auto computeSubmittedInstance = device->executeCommandList(computeCommandList, nvrhi::CommandQueue::Compute);
-
-			// MSN Conversion - must happen after buffers are uploaded and GPU is idle
+			// MSN Conversion - waits for copy
 			if (modelPtr->ShouldQueueMSNConversion()) {
 				auto graphicsCommandList = Renderer::GetSingleton()->GetGraphicsCommandList();
 				graphicsCommandList->open();
@@ -1202,12 +1124,10 @@ Model* SceneGraph::CommitModel(const char* path, RE::NiAVObject* object, RE::TES
 
 				graphicsCommandList->close();
 
-				device->queueWaitForCommandList(nvrhi::CommandQueue::Graphics, nvrhi::CommandQueue::Compute, computeSubmittedInstance);
-
+				auto device = Renderer::GetSingleton()->GetDevice();
+				device->queueWaitForCommandList(nvrhi::CommandQueue::Graphics, nvrhi::CommandQueue::Copy, modelPtr->m_SubmittedCopyInstance);
 				device->executeCommandList(graphicsCommandList, nvrhi::CommandQueue::Graphics);
 			}
-
-			device->waitForIdle();
 
 			logger::debug("SceneGraph::CommitModel - Commited {} TriShapes to [0x{:08X}]", shapeCount, reinterpret_cast<uintptr_t>(modelPtr));
 
@@ -1226,20 +1146,14 @@ Model* SceneGraph::CommitModel(const char* path, RE::NiAVObject* object, RE::TES
 
 Instance* SceneGraph::AddInstanceImpl(RE::NiAVObject* node, Model* model, RE::FormID formID)
 {
-	auto& instance = m_Instances.emplace_back(eastl::make_unique<Instance>(formID, node, model));
+	auto instance = eastl::make_unique<Instance>(formID, node, model);
 	instance->model->AddRef();
 
-	return instance.get();
-}
+	auto instancePtr = instance.get();
 
-void SceneGraph::AddInstance(RE::FormID formID, RE::NiAVObject* node, eastl::string path)
-{
-	auto modelIt = m_Models.find(path);
-	if (modelIt == m_Models.end())
-		return;
+	m_Instances.Add(eastl::move(instance));
 
-	if (auto* instance = AddInstanceImpl(node, modelIt->second.get(), formID))
-		m_InstancesFormIDs[formID].push_back(instance);
+	return instancePtr;
 }
 
 void SceneGraph::AddInstance(RE::FormID formID, RE::NiAVObject* node, Model* model)
@@ -1272,13 +1186,9 @@ void SceneGraph::SetLODDetached(RE::BGSTerrainBlock* block, bool detached)
 	if (it == m_TerrainLODInstances.end())
 		return;
 
-	Scene::GetSingleton()->m_SceneMutex.lock();
-
 	for (auto& instance : it->second.instances) {
 		instance->SetDetached(detached);
 	}
-
-	Scene::GetSingleton()->m_SceneMutex.unlock();
 
 	if (detached && detached != it->second.detached)
 		it->second.detachedTime = std::chrono::steady_clock::now();
@@ -1292,13 +1202,9 @@ void SceneGraph::SetLODDetached(RE::BGSObjectBlock* block, bool detached)
 	if (it == m_ObjectLODInstances.end())
 		return;
 
-	Scene::GetSingleton()->m_SceneMutex.lock();
-
 	for (auto& instance : it->second.instances) {
 		instance->SetDetached(detached);
 	}
-
-	Scene::GetSingleton()->m_SceneMutex.unlock();
 
 	if (detached && detached != it->second.detached)
 		it->second.detachedTime = std::chrono::steady_clock::now();
@@ -1312,13 +1218,9 @@ void SceneGraph::SetLODDetached(RE::BGSDistantTreeBlock* block, bool detached)
 	if (it == m_TreeLODInstances.end())
 		return;
 
-	Scene::GetSingleton()->m_SceneMutex.lock();
-
 	for (auto& instance : it->second.instances) {
 		instance->SetDetached(detached);
 	}
-
-	Scene::GetSingleton()->m_SceneMutex.unlock();
 
 	if (detached && detached != it->second.detached)
 		it->second.detachedTime = std::chrono::steady_clock::now();
@@ -1326,10 +1228,8 @@ void SceneGraph::SetLODDetached(RE::BGSDistantTreeBlock* block, bool detached)
 	it->second.detached = detached;
 }
 
-void SceneGraph::RunGarbageCollection(uint64_t frameIndex)
+void SceneGraph::RunGarbageCollection()
 {
-	m_ReleaseDataMutex.lock();
-
 	// Clear LOD
 	{
 		using namespace std::chrono;
@@ -1358,19 +1258,23 @@ void SceneGraph::RunGarbageCollection(uint64_t frameIndex)
 		}
 	}
 
-	// Clear Released Data
+	// Clear Models
 	{
+		std::scoped_lock modelLock(m_ModelReleaseMutex);
 
-		for (auto it = m_ReleasedData.begin(); it != m_ReleasedData.end(); ) {
-			if (it->frameIndex < frameIndex - 1 && it->model->m_LastBLASUpdate < frameIndex - 1) {
-				logger::debug("SceneGraph::RunGarbageCollection - Frame Index {}, Last Update {}, {}", it->frameIndex, it->model->m_LastBLASUpdate, it->model->m_Name);
-				it = m_ReleasedData.erase(it);
-			}
-			else {
+		for (auto it = m_ReleasedModels.begin(); it != m_ReleasedModels.end(); ) {
+			auto* model = it->get();
+
+			model->UpdateFlags();
+
+			const bool release =
+				(model->m_Flags & Model::Flags::BuffersUploaded) &&
+				(model->m_Flags & Model::Flags::BLASBuilt);
+
+			if (release)			
+				it = m_ReleasedModels.erase(it);
+			else
 				++it;
-			}
-		}
+		}		
 	}
-
-	m_ReleaseDataMutex.unlock();
 }
